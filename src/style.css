@@ -37,3 +37,6 @@ pre { margin: 0; font-family: ui-monospace, monospace; font-size: 13px; white-sp
 .lbl { font-size: 12px; font-weight: 600; margin-bottom: 2px; } .lbl.ours { color: #2563eb; } .lbl.theirs { color: #d97706; }
 .hunk textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 13px; }
 .result { background: #16a34a22; padding: 6px; }
+
+.editor{display:flex;flex-direction:column;height:100%}
+.editor textarea{flex:1;width:100%;font:14px/1.5 ui-monospace,monospace;box-sizing:border-box;padding:8px}
