@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
-import { createFsaFs } from '../git/fsa'
+import { addRepoName, listRepos, openRepoFs, removeRepo } from '../git/browserfs'
 import * as ops from '../git/ops'
+import * as remote from '../git/remote'
 import { suggestCommitMessage, type AiConfig } from '../ai'
 import { ConflictView } from './ConflictView'
 
-type Sel = { kind: 'diff'; path: string; staged: boolean } | { kind: 'conflict'; path: string } | null
+type Sel =
+  | { kind: 'diff'; path: string; staged: boolean }
+  | { kind: 'conflict'; path: string }
+  | { kind: 'edit'; path: string }
+  | null
 
 const loadAi = (): AiConfig => ({
   apiKey: localStorage.getItem('ge.apiKey') ?? '',
@@ -14,7 +19,13 @@ const loadAi = (): AiConfig => ({
 export function App() {
   const [repo, setRepo] = useState<ops.Repo | null>(null)
   const [folder, setFolder] = useState('')
-  const [needInit, setNeedInit] = useState<FileSystemDirectoryHandle | null>(null)
+  const [names, setNames] = useState<string[]>(listRepos)
+  const [files, setFiles] = useState<string[]>([])
+  const [net, setNet] = useState({
+    token: localStorage.getItem('ge.token') ?? '',
+    corsProxy: localStorage.getItem('ge.proxy') ?? 'https://cors.isomorphic-git.org',
+  })
+  const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<ops.Status | null>(null)
   const [branch, setBranch] = useState('')
   const [branches, setBranches] = useState<string[]>([])
@@ -41,30 +52,66 @@ export function App() {
       setBranches(await ops.branches(r))
       setLog(await ops.log(r))
       setMerging(await ops.mergeInProgress(r))
+      setFiles(await remote.listFiles(r))
     } catch (e) {
       onError(e)
     }
   }, [repo])
 
-  const attach = async (h: FileSystemDirectoryHandle) => {
-    const r = { fs: createFsaFs(h), dir: '/' }
+  const attach = async (name: string) => {
+    const r = { fs: openRepoFs(name), dir: '/' }
     setRepo(r)
-    setFolder(h.name)
+    setFolder(name)
     setSel(null)
-    setNeedInit(null)
     await refresh(r)
   }
 
-  const openFolder = async () => {
+  const registerName = (name: string) => {
+    addRepoName(name)
+    setNames(listRepos())
+  }
+
+  const newRepo = async () => {
+    const name = prompt('新しいリポジトリ名')?.trim()
+    if (!name) return
     try {
-      const h = await (window as any).showDirectoryPicker({ mode: 'readwrite' })
-      const r = { fs: createFsaFs(h), dir: '/' }
-      if (await ops.isRepo(r)) await attach(h)
-      else setNeedInit(h)
-    } catch (e: any) {
-      if (e?.name !== 'AbortError') onError(e)
+      const r = { fs: openRepoFs(name), dir: '/' }
+      if (!(await ops.isRepo(r))) await ops.init(r)
+      registerName(name)
+      await attach(name)
+    } catch (e) {
+      onError(e)
     }
   }
+
+  const cloneRepo = async () => {
+    const url = prompt('clone するURL (https://github.com/user/repo)')?.trim()
+    if (!url) return
+    const name = url.replace(/\.git$/, '').split('/').pop() || 'repo'
+    setBusy(true)
+    try {
+      setErr('')
+      removeRepo(name)
+      const r = { fs: openRepoFs(name), dir: '/' }
+      await remote.clone(r, url, net)
+      registerName(name)
+      await attach(name)
+    } catch (e) {
+      onError(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const deleteRepo = () => {
+    if (!repo || !confirm(`「${folder}」を端末から削除しますか?(未pushの変更は失われます)`)) return
+    removeRepo(folder)
+    setNames(listRepos())
+    setRepo(null)
+    setStatus(null)
+  }
+
+  const openRepo = (name: string) => name && attach(name).catch(onError)
 
   useEffect(() => {
     if (sel?.kind !== 'diff' || !repo) return setDiff('')
@@ -98,16 +145,29 @@ export function App() {
     setMsg(await suggestCommitMessage(ai, await ops.stagedDiffText(repo!)))
   })
 
-  if (!('showDirectoryPicker' in window))
-    return <div className="center">このブラウザは File System Access API 非対応です。Chrome / Edge を使ってください。</div>
+  const doPush = act(async () => {
+    setBusy(true)
+    try { await remote.push(repo!, net) } finally { setBusy(false) }
+  })
+  const doPull = act(async () => {
+    setBusy(true)
+    try { await remote.pull(repo!, net, author.name, author.email) } finally { setBusy(false) }
+  })
 
   return (
     <div className="app">
       <header>
-        <button className="primary" onClick={openFolder}>📂 フォルダを開く</button>
+        <select value={repo ? folder : ''} onChange={e => openRepo(e.target.value)}>
+          <option value="">📂 リポジトリ…</option>
+          {names.map(n => <option key={n}>{n}</option>)}
+        </select>
+        <button onClick={newRepo}>＋新規</button>
+        <button onClick={cloneRepo} disabled={busy}>⬇ clone</button>
         {repo && (
           <>
-            <b>{folder}</b>
+            <button onClick={doPull} disabled={busy}>pull</button>
+            <button onClick={doPush} disabled={busy}>push</button>
+            <button onClick={deleteRepo}>🗑</button>
             <select value={branch} onChange={e => act(() => ops.checkout(repo, e.target.value))()}>
               {branches.map(b => <option key={b}>{b}</option>)}
             </select>
@@ -134,6 +194,14 @@ export function App() {
             <input value={ai.model}
               onChange={e => { setAi({ ...ai, model: e.target.value }); localStorage.setItem('ge.model', e.target.value) }} />
           </label>
+          <label>GitHub トークン(clone/push/pull 用、この端末のlocalStorageにのみ保存)
+            <input type="password" value={net.token}
+              onChange={e => { setNet({ ...net, token: e.target.value }); localStorage.setItem('ge.token', e.target.value) }} />
+          </label>
+          <label>CORSプロキシ(トークンはこのプロキシ経由で送信されます。自前推奨)
+            <input value={net.corsProxy}
+              onChange={e => { setNet({ ...net, corsProxy: e.target.value }); localStorage.setItem('ge.proxy', e.target.value) }} />
+          </label>
           <label>コミッター名
             <input value={author.name}
               onChange={e => { setAuthor({ ...author, name: e.target.value }); localStorage.setItem('ge.name', e.target.value) }} />
@@ -145,18 +213,9 @@ export function App() {
         </div>
       )}
 
-      {needInit && (
-        <div className="center">
-          <p>「{needInit.name}」はgitリポジトリではありません。</p>
-          <button className="primary" onClick={async () => {
-            const r = { fs: createFsaFs(needInit), dir: '/' }
-            await ops.init(r).catch(onError)
-            await attach(needInit)
-          }}>git init する</button>
-        </div>
-      )}
+      {busy && <div className="merge-banner">通信中…</div>}
 
-      {!repo && !needInit && <div className="center">「フォルダを開く」でgitリポジトリを選択してください。</div>}
+      {!repo && <div className="center">リポジトリを選ぶか、「＋新規」「⬇ clone」で作成してください。</div>}
 
       {repo && status && (
         <div className="main">
@@ -175,6 +234,13 @@ export function App() {
                 ))}
               </Section>
             )}
+            <Section title={`ファイル (${files.length})`}
+              extra={<button onClick={() => { const p = prompt('新規ファイルのパス(例: docs/a.md)')?.trim(); if (p) act(() => remote.writeText(repo, p, ''))().then(() => setSel({ kind: 'edit', path: p })) }}>＋</button>}>
+              {files.map(p => (
+                <Row key={p} label={p} active={sel?.kind === 'edit' && sel.path === p}
+                  onClick={() => setSel({ kind: 'edit', path: p })} />
+              ))}
+            </Section>
             <Section title={`ステージ済み (${status.staged.length})`}>
               {status.staged.map(c => (
                 <Row key={c.path} label={`${badge(c.kind)} ${c.path}`}
@@ -218,6 +284,9 @@ export function App() {
                 onResolved={async () => { setSel(null); await refresh() }} />
             )}
             {sel?.kind === 'diff' && <DiffView text={diff} />}
+            {sel?.kind === 'edit' && (
+              <Editor key={sel.path} repo={repo} path={sel.path} onError={onError} onSaved={() => refresh()} />
+            )}
             {!sel && <div className="center">左の一覧からファイルを選択</div>}
           </section>
         </div>
@@ -238,6 +307,20 @@ function Row(p: { label: string; active: boolean; onClick: () => void; action?: 
       <span className="name">{p.label}</span>
       {p.action2 && <button onClick={e => { e.stopPropagation(); p.onAction2!() }}>{p.action2}</button>}
       {p.action && <button onClick={e => { e.stopPropagation(); p.onAction!() }}>{p.action}</button>}
+    </div>
+  )
+}
+
+function Editor({ repo, path, onError, onSaved }: { repo: ops.Repo; path: string; onError: (e: unknown) => void; onSaved: () => void }) {
+  const [text, setText] = useState<string | null>(null)
+  const [dirty, setDirty] = useState(false)
+  useEffect(() => { remote.readText(repo, path).then(setText, onError) }, [repo, path])
+  if (text === null) return <div className="center">読み込み中…</div>
+  const save = () => remote.writeText(repo, path, text).then(() => { setDirty(false); onSaved() }, onError)
+  return (
+    <div className="editor">
+      <div className="row"><b>{path}</b><button className="primary" onClick={save} disabled={!dirty}>保存</button></div>
+      <textarea value={text} spellCheck={false} onChange={e => { setText(e.target.value); setDirty(true) }} />
     </div>
   )
 }

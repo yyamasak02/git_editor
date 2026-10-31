@@ -10,6 +10,7 @@
     "test": "tsx test/ops.test.ts"
   },
   "dependencies": {
+    "@isomorphic-git/lightning-fs": "^4.10.5",
     "buffer": "^6.0.3",
     "diff": "^9.0.0",
     "diff3": "^0.0.4",
